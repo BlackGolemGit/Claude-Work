@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900;
+}
+
+/* react-big-calendar base styling, overridden lightly to match the app's palette */
+.rbc-calendar {
+  @apply text-sm;
+}
+.rbc-event {
+  @apply border-0 rounded-md;
+}
+.rbc-today {
+  @apply bg-blue-50;
+}
+.rbc-toolbar button {
+  @apply text-slate-700;
+}
+.rbc-toolbar button.rbc-active {
+  @apply bg-slate-800 text-white;
+}
