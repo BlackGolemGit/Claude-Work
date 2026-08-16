@@ -77,7 +77,6 @@ At least one Google account is required for **Calendar** access (IMAP accounts h
      - `https://www.googleapis.com/auth/gmail.modify`
      - `https://www.googleapis.com/auth/gmail.send`
      - `https://www.googleapis.com/auth/userinfo.email`
-     - `openid`
    - Under **Test users** (while the app is in "Testing" publishing status), add every Google account you plan to connect — otherwise Google will block the OAuth login for that account.
 4. In **APIs & Services → Credentials**:
    - Click **Create Credentials → OAuth client ID**.
