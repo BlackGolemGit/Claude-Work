@@ -1,8 +1,9 @@
-// Scans Gmail for HotSchedules shift notification emails, parses them with
-// Claude, and syncs each shift into Google Calendar as a hard-blocked event.
-// Runs once daily via cron, and on demand from the "Sync Now" button.
+// Scans every connected email account for HotSchedules shift notification
+// emails, parses them with Claude, and syncs each shift into Google Calendar
+// as a hard-blocked event. Runs once daily via cron, and on demand from the
+// "Sync Now" button.
 const { db, recordSync, isEmailProcessed, markEmailProcessed } = require('../db/db');
-const gmailService = require('../services/gmail');
+const emailAccounts = require('../services/emailAccounts');
 const claude = require('../services/claude');
 const calendarService = require('../services/calendar');
 
@@ -14,65 +15,78 @@ function bodyOf(message) {
   return message.text?.trim() ? message.text : stripHtml(message.html);
 }
 
-const QUERY = '(from:hotschedules.com OR subject:HotSchedules OR subject:schedule OR subject:shift OR subject:"upcoming shifts") newer_than:10d';
+const GMAIL_QUERY = '(from:hotschedules.com OR subject:HotSchedules OR subject:schedule OR subject:shift OR subject:"upcoming shifts") newer_than:10d';
+const HOTSCHEDULES_PATTERN = /hotschedules|schedule|shift/i;
+
+function matchPredicate(message) {
+  return HOTSCHEDULES_PATTERN.test(`${message.subject} ${message.from}`);
+}
 
 async function syncNow() {
-  let messages = [];
-  try {
-    messages = await gmailService.searchMessages(QUERY, 20);
-  } catch (err) {
-    if (err.code === 'GOOGLE_NOT_CONNECTED') {
-      console.log('[hotschedulesSync] Skipping — Google not connected.');
-      return { scanned: 0, shiftsSynced: 0 };
-    }
-    throw err;
-  }
+  const accounts = emailAccounts.listAllAccounts();
+  let totalScanned = 0;
+  let totalShifts = 0;
 
-  let shiftsSynced = 0;
-  for (const message of messages) {
-    if (isEmailProcessed(message.id, 'hotschedules')) continue;
+  for (const account of accounts) {
+    let messages = [];
     try {
-      const parsed = await claude.parseHotSchedulesEmail({
-        subject: message.subject,
-        text: bodyOf(message),
+      messages = await emailAccounts.fetchCandidateMessages(account, {
+        gmailQuery: GMAIL_QUERY,
+        sinceDays: 10,
+        maxResults: 20,
+        matchPredicate,
       });
-      for (const shift of parsed.shifts || []) {
-        if (!shift.date || !shift.start_time || !shift.end_time) continue;
-        const existing = db
-          .prepare(`SELECT id FROM work_shifts WHERE date = ? AND start_time = ? AND end_time = ?`)
-          .get(shift.date, shift.start_time, shift.end_time);
-        if (existing) continue;
-
-        let calendarEventId = null;
-        try {
-          const event = await calendarService.createEvent({
-            title: `🏢 Work Shift — ${shift.role || 'Shift'}`,
-            description: `Synced from HotSchedules email.${shift.location ? ` Location: ${shift.location}` : ''}`,
-            location: shift.location || '',
-            start: `${shift.date}T${shift.start_time}:00`,
-            end: `${shift.date}T${shift.end_time}:00`,
-          });
-          calendarEventId = event.id;
-        } catch (err) {
-          console.error('[hotschedulesSync] Failed to create calendar event for shift:', err.message);
-        }
-
-        db.prepare(
-          `INSERT INTO work_shifts (date, start_time, end_time, role, location, calendar_event_id, gmail_message_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
-        ).run(shift.date, shift.start_time, shift.end_time, shift.role || null, shift.location || null, calendarEventId, message.id);
-        shiftsSynced += 1;
-      }
     } catch (err) {
-      console.error(`[hotschedulesSync] Failed to process email ${message.id}:`, err.message);
-    } finally {
-      markEmailProcessed(message.id, 'hotschedules');
+      console.error(`[hotschedulesSync] Scan failed for ${account.email}:`, err.message);
+      continue;
+    }
+    totalScanned += messages.length;
+
+    for (const message of messages) {
+      if (isEmailProcessed(account.id, message.id, 'hotschedules')) continue;
+      try {
+        const parsed = await claude.parseHotSchedulesEmail({
+          subject: message.subject,
+          text: bodyOf(message),
+        });
+        for (const shift of parsed.shifts || []) {
+          if (!shift.date || !shift.start_time || !shift.end_time) continue;
+          const existing = db
+            .prepare(`SELECT id FROM work_shifts WHERE date = ? AND start_time = ? AND end_time = ?`)
+            .get(shift.date, shift.start_time, shift.end_time);
+          if (existing) continue;
+
+          let calendarEventId = null;
+          try {
+            const event = await calendarService.createEvent({
+              title: `🏢 Work Shift — ${shift.role || 'Shift'}`,
+              description: `Synced from HotSchedules email (${account.email}).${shift.location ? ` Location: ${shift.location}` : ''}`,
+              location: shift.location || '',
+              start: `${shift.date}T${shift.start_time}:00`,
+              end: `${shift.date}T${shift.end_time}:00`,
+            });
+            calendarEventId = event.id;
+          } catch (err) {
+            console.error('[hotschedulesSync] Failed to create calendar event for shift:', err.message);
+          }
+
+          db.prepare(
+            `INSERT INTO work_shifts (date, start_time, end_time, role, location, calendar_event_id, message_id, account_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          ).run(shift.date, shift.start_time, shift.end_time, shift.role || null, shift.location || null, calendarEventId, message.id, account.id);
+          totalShifts += 1;
+        }
+      } catch (err) {
+        console.error(`[hotschedulesSync] Failed to process email ${message.id} (${account.email}):`, err.message);
+      } finally {
+        markEmailProcessed(account.id, message.id, 'hotschedules');
+      }
     }
   }
 
-  recordSync('hotschedules', `Scanned ${messages.length} email(s), synced ${shiftsSynced} shift(s)`);
+  recordSync('hotschedules', `Scanned ${totalScanned} email(s) across ${accounts.length} account(s), synced ${totalShifts} shift(s)`);
 
-  if (shiftsSynced > 0) {
+  if (totalShifts > 0) {
     try {
       const { runCalendarAnalysis } = require('../routes/calendar');
       await runCalendarAnalysis();
@@ -81,7 +95,7 @@ async function syncNow() {
     }
   }
 
-  return { scanned: messages.length, shiftsSynced };
+  return { scanned: totalScanned, shiftsSynced: totalShifts };
 }
 
 module.exports = { syncNow };

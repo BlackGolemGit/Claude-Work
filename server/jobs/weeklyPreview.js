@@ -1,6 +1,6 @@
 // Gathers the full upcoming week (events, shifts, deadlines, RSVPs) and asks
 // Claude to write a friendly weekly preview, delivered every Sunday.
-const { getUser, db, recordSync } = require('../db/db');
+const { getUser, db, recordSync, listMemories } = require('../db/db');
 const calendarService = require('../services/calendar');
 const claude = require('../services/claude');
 const { deliverNotification } = require('../routes/notifications');
@@ -36,6 +36,7 @@ async function runWeeklyPreview() {
     workShifts,
     rsvps,
     conflicts,
+    memories: listMemories(),
   });
 
   const results = await deliverNotification({ subject: 'Your Week Ahead 📅', body: preview });

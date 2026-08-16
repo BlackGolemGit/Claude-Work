@@ -3,6 +3,7 @@ import RSVPCard from './RSVPCard.jsx';
 import SuggestionCard from './SuggestionCard.jsx';
 import ConflictBanner from './ConflictBanner.jsx';
 import { api } from '../api.js';
+import { speak, speechSynthesisSupported } from '../voice.js';
 
 const CATEGORY_COLORS = {
   work: 'bg-work',
@@ -39,6 +40,8 @@ export default function Dashboard({ onNavigate }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [syncing, setSyncing] = useState(false);
+  const [recap, setRecap] = useState(null);
+  const [recapLoading, setRecapLoading] = useState(false);
 
   const loadAll = useCallback(async () => {
     setError(null);
@@ -78,6 +81,22 @@ export default function Dashboard({ onNavigate }) {
     }
   }
 
+  async function speakMyDay() {
+    setRecapLoading(true);
+    setError(null);
+    try {
+      const data = await api.get('/chat/voice-recap');
+      setRecap(data);
+      if (speechSynthesisSupported()) {
+        await speak([data.recap, ...(data.questions || [])].join(' ... '));
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRecapLoading(false);
+    }
+  }
+
   if (loading) return <p className="text-slate-500">Loading your dashboard…</p>;
 
   return (
@@ -87,17 +106,41 @@ export default function Dashboard({ onNavigate }) {
           <h2 className="text-2xl font-bold text-slate-800">Dashboard</h2>
           <p className="text-sm text-slate-500">Last synced {timeAgo(today.lastSynced)}</p>
         </div>
-        <button
-          onClick={runSync}
-          disabled={syncing}
-          className="text-sm font-medium bg-slate-800 hover:bg-slate-900 disabled:opacity-50 text-white px-4 py-2 rounded-lg"
-        >
-          {syncing ? 'Syncing…' : '🔄 Sync Now'}
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={speakMyDay}
+            disabled={recapLoading}
+            className="text-sm font-medium bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg"
+          >
+            {recapLoading ? 'Thinking…' : '🔊 Speak My Day'}
+          </button>
+          <button
+            onClick={runSync}
+            disabled={syncing}
+            className="text-sm font-medium bg-slate-800 hover:bg-slate-900 disabled:opacity-50 text-white px-4 py-2 rounded-lg"
+          >
+            {syncing ? 'Syncing…' : '🔄 Sync Now'}
+          </button>
+        </div>
       </div>
 
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg p-3">{error}</div>
+      )}
+
+      {recap && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-2">
+          <p className="text-sm text-slate-800">{recap.recap}</p>
+          {recap.questions?.length > 0 && (
+            <div className="pt-1 space-y-1">
+              <p className="text-xs font-semibold text-blue-700">Questions for you:</p>
+              {recap.questions.map((q, i) => (
+                <p key={i} className="text-sm text-slate-700">❓ {q}</p>
+              ))}
+            </div>
+          )}
+          <button onClick={() => setRecap(null)} className="text-xs text-blue-600 hover:underline">Dismiss</button>
+        </div>
       )}
 
       {suggestions.conflicts.length > 0 && (

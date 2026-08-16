@@ -3,7 +3,7 @@
 // (schedule/move/delete events, mark homework complete, next shift lookup).
 const express = require('express');
 const router = express.Router();
-const { db, getUser } = require('../db/db');
+const { db, getUser, listMemories, addMemory } = require('../db/db');
 const claude = require('../services/claude');
 const calendarService = require('../services/calendar');
 
@@ -63,6 +63,18 @@ const TOOLS = [
     description: 'Look up the user\'s next upcoming work shift from cached HotSchedules data.',
     input_schema: { type: 'object', properties: {} },
   },
+  {
+    name: 'remember',
+    description: 'Save a durable fact, preference, routine, or note about the user to long-term memory so future conversations and briefings can use it. Use this whenever the user shares something worth remembering (a preference, a recurring commitment, a person in their life, a goal), not just for explicit "remember this" requests.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: 'The fact to remember, written in third person, e.g. "Prefers study sessions in the morning."' },
+        category: { type: 'string', enum: ['preference', 'fact', 'routine', 'people', 'goal', 'general'] },
+      },
+      required: ['content'],
+    },
+  },
 ];
 
 async function executeTool(name, input) {
@@ -110,15 +122,22 @@ async function executeTool(name, input) {
         .get(today, today, currentTime);
       return shift || { message: 'No upcoming shifts found.' };
     }
+    case 'remember': {
+      const memory = addMemory({ content: input.content, category: input.category || 'general', source: 'chat' });
+      return { success: true, memory: { id: memory.id, content: memory.content, category: memory.category } };
+    }
     default:
       return { success: false, error: `Unknown tool: ${name}` };
   }
 }
 
 function buildSystemPrompt(context) {
-  return `You are a helpful, friendly AI personal scheduling assistant embedded in a web app. You can answer questions about the user's schedule and take real actions using the tools provided (schedule_event, move_event, delete_event, mark_homework_complete, get_next_work_shift).
+  const memoryBlock = context.memories?.length
+    ? `\n\nWHAT YOU KNOW ABOUT THE USER (long-term memory):\n${context.memories.map((m) => `- [${m.category}] ${m.content}`).join('\n')}`
+    : '';
+  return `You are a helpful, friendly AI personal scheduling assistant embedded in a web app. You can answer questions about the user's schedule and take real actions using the tools provided (schedule_event, move_event, delete_event, mark_homework_complete, get_next_work_shift, remember).
 
-Always use a tool when the user asks you to actually change something (schedule, move, delete, mark complete). Otherwise just answer conversationally using the context below. When you take an action, briefly confirm what you did in plain language. Be concise.
+Always use a tool when the user asks you to actually change something (schedule, move, delete, mark complete). Use the "remember" tool proactively whenever the user shares a lasting preference, routine, goal, or fact about themselves or people in their life — not just when they explicitly say "remember this". Otherwise just answer conversationally using the context below. When you take an action, briefly confirm what you did in plain language. Be concise.
 
 CURRENT CONTEXT
 Current date/time: ${context.now}
@@ -134,7 +153,7 @@ UPCOMING WORK SHIFTS:
 ${JSON.stringify(context.workShifts, null, 2)}
 
 PENDING RSVPs:
-${JSON.stringify(context.rsvps, null, 2)}`;
+${JSON.stringify(context.rsvps, null, 2)}${memoryBlock}`;
 }
 
 router.get('/history', (req, res) => {
@@ -145,6 +164,37 @@ router.get('/history', (req, res) => {
 router.delete('/history', (req, res) => {
   db.prepare(`DELETE FROM conversation_history`).run();
   res.json({ success: true });
+});
+
+// Powers the voice "Speak my day" button: a spoken-style recap plus any
+// clarifying questions the agent has, returned as plain JSON (not streamed)
+// so the client can hand the whole thing to speechSynthesis at once.
+router.get('/voice-recap', async (req, res) => {
+  try {
+    const user = getUser();
+    const [todayEvents, schoolTasks, workShifts, rsvps] = await Promise.all([
+      calendarService.getTodayEvents(user.timezone).catch(() => []),
+      Promise.resolve(db.prepare(`SELECT * FROM school_tasks WHERE status = 'pending' ORDER BY due_date ASC LIMIT 15`).all()),
+      Promise.resolve(db.prepare(`SELECT * FROM work_shifts WHERE date >= date('now') ORDER BY date ASC LIMIT 5`).all()),
+      Promise.resolve(db.prepare(`SELECT * FROM rsvps WHERE status = 'pending' ORDER BY detected_at DESC LIMIT 10`).all()),
+    ]);
+    const conflicts = calendarService.findConflicts(todayEvents);
+    const { recap, questions } = await claude.generateVoiceRecap({
+      now: new Date().toString(),
+      timezone: user.timezone,
+      userName: user.name,
+      todayEvents,
+      schoolTasks,
+      workShifts,
+      rsvps,
+      conflicts,
+      memories: listMemories(),
+    });
+    res.json({ recap, questions });
+  } catch (err) {
+    console.error('[chat] Failed to generate voice recap:', err.message);
+    res.status(500).json({ error: err.message || 'Could not generate a recap right now.' });
+  }
 });
 
 router.post('/message', async (req, res) => {
@@ -178,6 +228,7 @@ router.post('/message', async (req, res) => {
       schoolTasks,
       workShifts,
       rsvps,
+      memories: listMemories(),
     });
 
     const priorHistory = db

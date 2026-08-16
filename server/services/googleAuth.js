@@ -1,7 +1,14 @@
-// Handles Google OAuth 2.0: consent URL generation, code exchange, and
-// automatic refresh-token based renewal of access tokens for Calendar + Gmail.
+// Handles Google OAuth 2.0 for potentially several connected Google
+// accounts: consent URL generation, code exchange, and automatic
+// refresh-token based renewal of access tokens for Calendar + Gmail.
 const { google } = require('googleapis');
-const { getUser, updateUser } = require('../db/db');
+const {
+  listEmailAccounts,
+  getEmailAccount,
+  upsertGoogleAccount,
+  updateGoogleAccountTokens,
+  getCalendarPrimaryAccount,
+} = require('../db/db');
 const { encrypt, decrypt } = require('./encryption');
 
 const SCOPES = [
@@ -20,11 +27,13 @@ function createOAuthClient() {
   );
 }
 
+/** Generates the consent URL. Always forces the account chooser so adding a
+ *  second/third Google account doesn't silently reuse the last session. */
 function getAuthUrl() {
   const client = createOAuthClient();
   return client.generateAuthUrl({
     access_type: 'offline',
-    prompt: 'consent', // ensures a refresh_token is returned every time
+    prompt: 'consent select_account', // ensures a refresh_token is returned every time, and lets the user pick which Google account
     scope: SCOPES,
   });
 }
@@ -34,90 +43,90 @@ async function handleOAuthCallback(code) {
   const { tokens } = await client.getToken(code);
   client.setCredentials(tokens);
 
-  // Fetch the connected Google account's email for display in Settings.
   const oauth2 = google.oauth2({ auth: client, version: 'v2' });
-  let email = null;
-  try {
-    const { data } = await oauth2.userinfo.get();
-    email = data.email;
-  } catch (err) {
-    console.error('[googleAuth] Failed to fetch userinfo:', err.message);
-  }
+  const { data } = await oauth2.userinfo.get();
+  const email = data.email;
 
-  updateUser({
-    google_access_token: encrypt(tokens.access_token),
-    google_refresh_token: tokens.refresh_token
-      ? encrypt(tokens.refresh_token)
-      : getUser().google_refresh_token, // keep existing refresh token if Google didn't send a new one
-    google_token_expiry: tokens.expiry_date || null,
-    google_email: email,
-    google_connected: 1,
+  const account = upsertGoogleAccount({
+    email,
+    label: email,
+    accessToken: encrypt(tokens.access_token),
+    refreshToken: tokens.refresh_token ? encrypt(tokens.refresh_token) : null,
+    expiry: tokens.expiry_date || null,
   });
 
-  return { email };
-}
-
-function disconnectGoogle() {
-  updateUser({
-    google_access_token: null,
-    google_refresh_token: null,
-    google_token_expiry: null,
-    google_email: null,
-    google_connected: 0,
-  });
+  return { email, accountId: account.id };
 }
 
 /**
- * Returns an OAuth2 client authenticated for the current user, refreshing
- * the access token automatically (and persisting the new one) whenever it's
- * missing or expired. Throws a friendly error if Google isn't connected.
+ * Returns an OAuth2 client authenticated for a specific email_accounts row,
+ * refreshing the access token automatically (and persisting the new one)
+ * whenever it's missing or expired.
  */
-async function getAuthenticatedClient() {
-  const user = getUser();
-  if (!user.google_connected || !user.google_refresh_token) {
-    const err = new Error('Google account is not connected. Connect it from Settings.');
+async function getClientForAccount(account) {
+  if (!account || account.provider !== 'google') {
+    const err = new Error('That account is not a connected Google account.');
+    err.code = 'GOOGLE_NOT_CONNECTED';
+    throw err;
+  }
+  const refreshToken = decrypt(account.google_refresh_token);
+  if (!refreshToken) {
+    const err = new Error(`Google account ${account.email} is missing a refresh token — please reconnect it in Settings.`);
     err.code = 'GOOGLE_NOT_CONNECTED';
     throw err;
   }
 
   const client = createOAuthClient();
-  const refreshToken = decrypt(user.google_refresh_token);
-  const accessToken = decrypt(user.google_access_token);
-
   client.setCredentials({
-    access_token: accessToken,
+    access_token: decrypt(account.google_access_token),
     refresh_token: refreshToken,
-    expiry_date: user.google_token_expiry,
+    expiry_date: account.google_token_expiry,
   });
 
-  const isExpired = !user.google_token_expiry || Date.now() >= user.google_token_expiry - 60000;
+  const isExpired = !account.google_token_expiry || Date.now() >= account.google_token_expiry - 60000;
   if (isExpired) {
     const { credentials } = await client.refreshAccessToken();
     client.setCredentials(credentials);
-    updateUser({
-      google_access_token: encrypt(credentials.access_token),
-      google_token_expiry: credentials.expiry_date || null,
-      google_refresh_token: credentials.refresh_token
-        ? encrypt(credentials.refresh_token)
-        : user.google_refresh_token,
+    updateGoogleAccountTokens(account.id, {
+      accessToken: encrypt(credentials.access_token),
+      refreshToken: credentials.refresh_token ? encrypt(credentials.refresh_token) : null,
+      expiry: credentials.expiry_date || null,
     });
   }
 
-  // Keep client refreshed transparently on any future 401s too.
   client.on('tokens', (tokens) => {
-    const patch = {};
-    if (tokens.access_token) patch.google_access_token = encrypt(tokens.access_token);
-    if (tokens.expiry_date) patch.google_token_expiry = tokens.expiry_date;
-    if (tokens.refresh_token) patch.google_refresh_token = encrypt(tokens.refresh_token);
-    if (Object.keys(patch).length) updateUser(patch);
+    if (!tokens.access_token && !tokens.refresh_token) return;
+    updateGoogleAccountTokens(account.id, {
+      accessToken: tokens.access_token ? encrypt(tokens.access_token) : decrypt(account.google_access_token),
+      refreshToken: tokens.refresh_token ? encrypt(tokens.refresh_token) : null,
+      expiry: tokens.expiry_date || account.google_token_expiry,
+    });
   });
 
   return client;
 }
 
+/** All connected Google accounts (used by the Gmail-polling jobs to scan every inbox). */
+function listGoogleAccounts() {
+  return listEmailAccounts({ provider: 'google' });
+}
+
+/** The single Google account Calendar operations go through. */
+async function getAuthenticatedClient() {
+  const account = getCalendarPrimaryAccount();
+  if (!account) {
+    const err = new Error('No Google account is connected. Connect one from Settings.');
+    err.code = 'GOOGLE_NOT_CONNECTED';
+    throw err;
+  }
+  return getClientForAccount(account);
+}
+
 module.exports = {
   getAuthUrl,
   handleOAuthCallback,
-  disconnectGoogle,
+  getClientForAccount,
+  listGoogleAccounts,
   getAuthenticatedClient,
+  SCOPES,
 };

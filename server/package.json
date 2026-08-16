@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "test": "node --test --test-concurrency=1",
+    "loadtest": "node scripts/loadtest.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
@@ -14,10 +16,15 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
     "googleapis": "^144.0.0",
+    "imapflow": "^1.0.171",
+    "mailparser": "^3.7.2",
     "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.16",
     "twilio": "^5.3.5"
   },
   "devDependencies": {
-    "nodemon": "^3.1.7"
+    "autocannon": "^7.15.0",
+    "nodemon": "^3.1.7",
+    "supertest": "^7.0.0"
   }
 }

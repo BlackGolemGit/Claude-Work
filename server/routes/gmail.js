@@ -1,9 +1,9 @@
 // RSVP detection & management endpoints (Dashboard Accept/Decline buttons).
 const express = require('express');
 const router = express.Router();
-const { db, recordSync, getLastSync } = require('../db/db');
+const { db, recordSync, getLastSync, getEmailAccount } = require('../db/db');
 const calendarService = require('../services/calendar');
-const gmailService = require('../services/gmail');
+const emailAccounts = require('../services/emailAccounts');
 
 function asyncHandler(fn) {
   return (req, res, next) => fn(req, res, next).catch((err) => {
@@ -14,7 +14,13 @@ function asyncHandler(fn) {
 }
 
 router.get('/rsvps', asyncHandler(async (req, res) => {
-  const rows = db.prepare(`SELECT * FROM rsvps ORDER BY (status = 'pending') DESC, detected_at DESC LIMIT 100`).all();
+  const rows = db
+    .prepare(
+      `SELECT rsvps.*, email_accounts.email AS account_email
+       FROM rsvps LEFT JOIN email_accounts ON email_accounts.id = rsvps.account_id
+       ORDER BY (rsvps.status = 'pending') DESC, rsvps.detected_at DESC LIMIT 100`
+    )
+    .all();
   res.json({ rsvps: rows, lastSynced: getLastSync('rsvp')?.last_synced_at || null });
 }));
 
@@ -24,6 +30,23 @@ router.post('/scan', asyncHandler(async (req, res) => {
   const result = await pollRsvps();
   res.json({ success: true, ...result });
 }));
+
+async function replyFromAccount(rsvp, body) {
+  if (!rsvp.organizer_email || !rsvp.account_id) return;
+  const account = getEmailAccount(rsvp.account_id);
+  if (!account) return;
+  try {
+    await emailAccounts.replyToMessage(account, {
+      threadId: rsvp.message_id,
+      messageIdHeader: rsvp.message_id_header,
+      to: rsvp.organizer_email,
+      subject: rsvp.event_title,
+      body,
+    });
+  } catch (err) {
+    console.error(`[gmail] Failed to send RSVP reply from ${account.email}:`, err.message);
+  }
+}
 
 router.post('/rsvps/:id/accept', asyncHandler(async (req, res) => {
   const rsvp = db.prepare(`SELECT * FROM rsvps WHERE id = ?`).get(req.params.id);
@@ -66,19 +89,7 @@ router.post('/rsvps/:id/accept', asyncHandler(async (req, res) => {
     db.prepare(`UPDATE rsvps SET status = 'accepted', calendar_event_id = ? WHERE id = ?`).run(event.id, rsvp.id);
   }
 
-  if (rsvp.organizer_email && rsvp.gmail_message_id) {
-    try {
-      await gmailService.replyToMessage({
-        messageId: rsvp.gmail_message_id,
-        threadId: rsvp.gmail_message_id,
-        to: rsvp.organizer_email,
-        subject: rsvp.event_title,
-        body: `Hi,\n\nI'm happy to confirm — I'll be attending "${rsvp.event_title}".\n\nSee you there!`,
-      });
-    } catch (err) {
-      console.error('[gmail] Failed to send acceptance reply:', err.message);
-    }
-  }
+  await replyFromAccount(rsvp, `Hi,\n\nI'm happy to confirm — I'll be attending "${rsvp.event_title}".\n\nSee you there!`);
 
   recordSync('rsvp', `Accepted "${rsvp.event_title}"`);
   res.json({ success: true });
@@ -97,19 +108,7 @@ router.post('/rsvps/:id/decline', asyncHandler(async (req, res) => {
   }
   db.prepare(`UPDATE rsvps SET status = 'declined', calendar_event_id = NULL WHERE id = ?`).run(rsvp.id);
 
-  if (rsvp.organizer_email && rsvp.gmail_message_id) {
-    try {
-      await gmailService.replyToMessage({
-        messageId: rsvp.gmail_message_id,
-        threadId: rsvp.gmail_message_id,
-        to: rsvp.organizer_email,
-        subject: rsvp.event_title,
-        body: `Hi,\n\nThanks for the invite to "${rsvp.event_title}" — unfortunately I won't be able to make it this time.\n\nBest,`,
-      });
-    } catch (err) {
-      console.error('[gmail] Failed to send decline reply:', err.message);
-    }
-  }
+  await replyFromAccount(rsvp, `Hi,\n\nThanks for the invite to "${rsvp.event_title}" — unfortunately I won't be able to make it this time.\n\nBest,`);
 
   recordSync('rsvp', `Declined "${rsvp.event_title}"`);
   res.json({ success: true });

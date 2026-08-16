@@ -1,10 +1,15 @@
-// Settings tab endpoints: preferences, Google OAuth connect/disconnect,
-// and Twilio credential storage (AES encrypted at rest).
+// Settings tab endpoints: preferences, connected-account management
+// (multiple Google accounts + generic IMAP/SMTP accounts), and Twilio
+// credential storage (AES encrypted at rest).
 const express = require('express');
 const router = express.Router();
-const { getUser, updateUser } = require('../db/db');
-const { encrypt, decrypt } = require('../services/encryption');
+const {
+  getUser, updateUser, listEmailAccounts, getEmailAccount, deleteEmailAccount,
+  setCalendarPrimary, upsertImapAccount, db,
+} = require('../db/db');
+const { encrypt } = require('../services/encryption');
 const googleAuth = require('../services/googleAuth');
+const emailAccounts = require('../services/emailAccounts');
 
 function asyncHandler(fn) {
   return (req, res, next) => fn(req, res, next).catch((err) => {
@@ -25,8 +30,6 @@ function sanitize(user) {
     timezone: user.timezone,
     school_email_domains: user.school_email_domains,
     school_keywords: user.school_keywords,
-    google_connected: !!user.google_connected,
-    google_email: user.google_email,
     twilio_configured: !!(user.twilio_account_sid && user.twilio_auth_token),
     twilio_from_number: user.twilio_from_number,
   };
@@ -59,6 +62,15 @@ router.put('/', asyncHandler(async (req, res) => {
   res.json({ settings: sanitize(updated) });
 }));
 
+// ---------------------------------------------------------------------------
+// Connected accounts (Google + IMAP)
+// ---------------------------------------------------------------------------
+
+router.get('/accounts', asyncHandler(async (req, res) => {
+  const accounts = listEmailAccounts({ activeOnly: false }).map(emailAccounts.describeAccount);
+  res.json({ accounts });
+}));
+
 router.get('/google/auth-url', asyncHandler(async (req, res) => {
   res.json({ url: googleAuth.getAuthUrl() });
 }));
@@ -76,8 +88,60 @@ router.get('/google/callback', asyncHandler(async (req, res) => {
   res.redirect(`${clientUrl}/?tab=settings&google=connected`);
 }));
 
-router.post('/google/disconnect', asyncHandler(async (req, res) => {
-  googleAuth.disconnectGoogle();
+router.post('/accounts/imap', asyncHandler(async (req, res) => {
+  const { id, email, label, imap, smtp } = req.body;
+  if (!email || !imap?.host || !imap?.username) {
+    return res.status(400).json({ error: 'Email, IMAP host, and IMAP username are required.' });
+  }
+  const account = upsertImapAccount({
+    id,
+    email,
+    label,
+    imap: {
+      host: imap.host,
+      port: imap.port ? Number(imap.port) : 993,
+      secure: imap.secure !== false,
+      username: imap.username,
+      password: imap.password ? encrypt(imap.password) : undefined,
+    },
+    smtp: {
+      host: smtp?.host || '',
+      port: smtp?.port ? Number(smtp.port) : 465,
+      secure: smtp?.secure !== false,
+      username: smtp?.username || imap.username,
+      password: smtp?.password ? encrypt(smtp.password) : undefined,
+    },
+  });
+  res.json({ account: emailAccounts.describeAccount(account) });
+}));
+
+router.post('/accounts/:id/test', asyncHandler(async (req, res) => {
+  const account = getEmailAccount(req.params.id);
+  if (!account) return res.status(404).json({ error: 'Account not found.' });
+  const result = await emailAccounts.testConnection(account);
+  res.json(result);
+}));
+
+router.post('/accounts/:id/set-primary-calendar', asyncHandler(async (req, res) => {
+  const account = getEmailAccount(req.params.id);
+  if (!account || account.provider !== 'google') {
+    return res.status(400).json({ error: 'Only a connected Google account can be the calendar account.' });
+  }
+  setCalendarPrimary(account.id);
+  res.json({ success: true });
+}));
+
+router.post('/accounts/:id/toggle-active', asyncHandler(async (req, res) => {
+  const account = getEmailAccount(req.params.id);
+  if (!account) return res.status(404).json({ error: 'Account not found.' });
+  db.prepare('UPDATE email_accounts SET is_active = ? WHERE id = ?').run(account.is_active ? 0 : 1, account.id);
+  res.json({ success: true });
+}));
+
+router.delete('/accounts/:id', asyncHandler(async (req, res) => {
+  const account = getEmailAccount(req.params.id);
+  if (!account) return res.status(404).json({ error: 'Account not found.' });
+  deleteEmailAccount(account.id);
   res.json({ success: true });
 }));
 

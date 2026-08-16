@@ -5,8 +5,10 @@ client/.env
 *.db
 *.db-wal
 *.db-shm
-server/db/*.sqlite
-server/db/*.sqlite3
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
 dist/
 build/
 client/dist/

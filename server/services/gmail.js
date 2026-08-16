@@ -1,10 +1,13 @@
 // Gmail wrapper: searching/reading messages, decoding bodies (incl. iCal
-// attachment detection), and sending/replying to emails.
+// attachment detection), and sending/replying to emails. Every function
+// takes an `account` (an email_accounts row with provider = 'google') as
+// its first argument so callers can operate across multiple connected
+// Google accounts.
 const { google } = require('googleapis');
-const { getAuthenticatedClient } = require('./googleAuth');
+const { getClientForAccount } = require('./googleAuth');
 
-async function getGmailClient() {
-  const auth = await getAuthenticatedClient();
+async function getGmailClient(account) {
+  const auth = await getClientForAccount(account);
   return google.gmail({ version: 'v1', auth });
 }
 
@@ -12,6 +15,7 @@ function friendlyError(err, fallback) {
   const message = err?.response?.data?.error?.message || err.message || fallback;
   const wrapped = new Error(message);
   wrapped.original = err;
+  if (err.code) wrapped.code = err.code;
   return wrapped;
 }
 
@@ -53,14 +57,13 @@ function headerValue(headers, name) {
 }
 
 /**
- * Searches Gmail with a query and returns normalized message summaries
- * (id, threadId, subject, from, date, snippet, text/html body, hasIcs).
- * `afterEpochSeconds` is appended to the query as `after:` to only scan
- * recent mail on each poll.
+ * Searches this account's Gmail with a query and returns normalized message
+ * summaries (id, threadId, messageIdHeader, subject, from, date, snippet,
+ * text/html body, hasIcs).
  */
-async function searchMessages(query, maxResults = 25) {
+async function searchMessages(account, query, maxResults = 25) {
   try {
-    const gmail = await getGmailClient();
+    const gmail = await getGmailClient(account);
     const { data } = await gmail.users.messages.list({
       userId: 'me',
       q: query,
@@ -79,6 +82,7 @@ async function searchMessages(query, maxResults = 25) {
         return {
           id: msg.id,
           threadId: msg.threadId,
+          messageIdHeader: headerValue(headers, 'Message-ID'),
           subject: headerValue(headers, 'Subject'),
           from: headerValue(headers, 'From'),
           date: headerValue(headers, 'Date'),
@@ -92,7 +96,7 @@ async function searchMessages(query, maxResults = 25) {
     return full;
   } catch (err) {
     if (err.code === 'GOOGLE_NOT_CONNECTED') throw err;
-    throw friendlyError(err, 'Failed to search Gmail.');
+    throw friendlyError(err, `Failed to search Gmail for ${account.email}.`);
   }
 }
 
@@ -108,29 +112,36 @@ function buildRawMessage({ to, subject, body, inReplyTo, references, threadId })
   return Buffer.from(raw).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-async function sendEmail({ to, subject, body }) {
+async function sendEmail(account, { to, subject, body }) {
   try {
-    const gmail = await getGmailClient();
+    const gmail = await getGmailClient(account);
     const raw = buildRawMessage({ to, subject, body });
     await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
     return true;
   } catch (err) {
     if (err.code === 'GOOGLE_NOT_CONNECTED') throw err;
-    throw friendlyError(err, 'Failed to send email.');
+    throw friendlyError(err, `Failed to send email from ${account.email}.`);
   }
 }
 
-/** Replies in-thread to an existing message (used for auto Accept/Decline responses). */
-async function replyToMessage({ messageId, threadId, to, subject, body }) {
+/**
+ * Replies in-thread to an existing message (used for auto Accept/Decline
+ * responses). `messageIdHeader` should be the RFC822 Message-ID header
+ * value (e.g. "<abc123@mail.gmail.com>") captured when the message was
+ * originally read, so In-Reply-To/References thread correctly in the
+ * recipient's client — falls back to the Gmail-internal id if unavailable.
+ */
+async function replyToMessage(account, { threadId, messageIdHeader, to, subject, body }) {
   try {
-    const gmail = await getGmailClient();
+    const gmail = await getGmailClient(account);
     const replySubject = subject.toLowerCase().startsWith('re:') ? subject : `Re: ${subject}`;
+    const refId = messageIdHeader || undefined;
     const raw = buildRawMessage({
       to,
       subject: replySubject,
       body,
-      inReplyTo: messageId,
-      references: messageId,
+      inReplyTo: refId,
+      references: refId,
     });
     await gmail.users.messages.send({
       userId: 'me',
@@ -139,7 +150,7 @@ async function replyToMessage({ messageId, threadId, to, subject, body }) {
     return true;
   } catch (err) {
     if (err.code === 'GOOGLE_NOT_CONNECTED') throw err;
-    throw friendlyError(err, 'Failed to send reply email.');
+    throw friendlyError(err, `Failed to send reply email from ${account.email}.`);
   }
 }
 

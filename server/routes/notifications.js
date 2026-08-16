@@ -4,8 +4,8 @@
 // Settings "send test notification" action.
 const express = require('express');
 const router = express.Router();
-const { getUser } = require('../db/db');
-const gmailService = require('../services/gmail');
+const { getUser, getNotificationAccount } = require('../db/db');
+const emailAccounts = require('../services/emailAccounts');
 const twilioService = require('../services/twilio');
 
 function asyncHandler(fn) {
@@ -27,10 +27,11 @@ async function deliverNotification({ subject, body }) {
 
   if (pref === 'email' || pref === 'both') {
     try {
-      if (!user.google_connected) throw new Error('Google account not connected.');
-      if (!user.email) throw new Error('No email address on file.');
-      await gmailService.sendEmail({ to: user.email, subject, body });
-      results.email = 'sent';
+      const account = getNotificationAccount();
+      if (!account) throw new Error('No email account is connected.');
+      if (!user.email) throw new Error('No destination email address on file (set it in Settings).');
+      await emailAccounts.sendEmail(account, { to: user.email, subject, body });
+      results.email = `sent via ${account.email}`;
     } catch (err) {
       results.email = `failed: ${err.message}`;
       console.error('[notifications] Email delivery failed:', err.message);

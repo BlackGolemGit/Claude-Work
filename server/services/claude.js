@@ -82,15 +82,23 @@ UNRESOLVED RSVPs:
 ${JSON.stringify(context.rsvps || [], null, 2)}`;
 }
 
+/** Renders stored long-term memories into a compact block for prompt context. Returns '' if none. */
+function formatMemories(memories) {
+  if (!memories || memories.length === 0) return '';
+  const lines = memories.map((m) => `- [${m.category}] ${m.content}`).join('\n');
+  return `\n\nWHAT YOU KNOW ABOUT THE USER (long-term memory — use this to personalize your response):\n${lines}`;
+}
+
 async function generateMorningBrief(context) {
   const system = `You are a warm, upbeat, and concise personal scheduling assistant writing a short morning briefing.
 Rules:
 - Keep it under 200 words.
 - Mention today's key events, any work shift, urgent school deadlines (due today or overdue), and pending RSVPs that need a response.
 - Flag any scheduling conflicts clearly if present.
+- Use what you know about the user (below) to personalize tone/suggestions, but don't just recite it back.
 - End on an encouraging note.
 - Plain text only, no markdown headers, suitable for email and SMS.`;
-  const userMessage = `Write today's morning briefing from this data:\n\n${baseContextBlock(context)}\n\nCONFLICTS TODAY:\n${JSON.stringify(context.conflicts || [], null, 2)}`;
+  const userMessage = `Write today's morning briefing from this data:\n\n${baseContextBlock(context)}\n\nCONFLICTS TODAY:\n${JSON.stringify(context.conflicts || [], null, 2)}${formatMemories(context.memories)}`;
   return complete({ system, messages: [{ role: 'user', content: userMessage }], maxTokens: 500 });
 }
 
@@ -101,9 +109,25 @@ Rules:
 - Organize loosely by day where useful, mentioning shifts, school deadlines, events, and pending RSVPs.
 - Point out the busiest day and any day that looks unusually light.
 - Flag conflicts if present.
+- Use what you know about the user (below) to personalize it, but don't just recite it back.
 - Plain text only, no markdown headers, suitable for email and SMS.`;
-  const userMessage = `Write this week's preview from this data:\n\nCurrent date/time: ${context.now}\n\nTHIS WEEK'S EVENTS:\n${JSON.stringify(context.weekEvents || [], null, 2)}\n\nSCHOOL DEADLINES THIS WEEK:\n${JSON.stringify(context.schoolTasks || [], null, 2)}\n\nWORK SHIFTS THIS WEEK:\n${JSON.stringify(context.workShifts || [], null, 2)}\n\nPENDING RSVPs:\n${JSON.stringify(context.rsvps || [], null, 2)}\n\nCONFLICTS:\n${JSON.stringify(context.conflicts || [], null, 2)}`;
+  const userMessage = `Write this week's preview from this data:\n\nCurrent date/time: ${context.now}\n\nTHIS WEEK'S EVENTS:\n${JSON.stringify(context.weekEvents || [], null, 2)}\n\nSCHOOL DEADLINES THIS WEEK:\n${JSON.stringify(context.schoolTasks || [], null, 2)}\n\nWORK SHIFTS THIS WEEK:\n${JSON.stringify(context.workShifts || [], null, 2)}\n\nPENDING RSVPs:\n${JSON.stringify(context.rsvps || [], null, 2)}\n\nCONFLICTS:\n${JSON.stringify(context.conflicts || [], null, 2)}${formatMemories(context.memories)}`;
   return complete({ system, messages: [{ role: 'user', content: userMessage }], maxTokens: 700 });
+}
+
+/**
+ * Generates a short spoken-style recap of the day plus a handful of specific
+ * questions the agent would like answered (used by the voice "Speak my day"
+ * feature). Returns { recap: string, questions: string[] }.
+ */
+async function generateVoiceRecap(context) {
+  const system = `You are a personal scheduling assistant about to speak a recap of the user's day out loud (this will go through text-to-speech). Respond with ONLY a JSON object, no prose, no markdown fences.
+Schema: { "recap": string, "questions": string[] }
+"recap" should be 2-4 natural spoken sentences (no bullet points, no markdown, numbers spelled naturally e.g. "three" not "3" where it reads more naturally) summarizing today/the near future: key events, shifts, urgent deadlines, conflicts, and pending RSVPs.
+"questions" should be 1-3 short, specific, genuinely useful questions the agent has for the user based on ambiguous or incomplete information it noticed (e.g. an RSVP with no clear time, a free block it's unsure how to use, a task with a vague title). If nothing is ambiguous, return an empty array — don't invent filler questions.`;
+  const userMessage = `${baseContextBlock(context)}\n\nCONFLICTS:\n${JSON.stringify(context.conflicts || [], null, 2)}${formatMemories(context.memories)}`;
+  const raw = await complete({ system, messages: [{ role: 'user', content: userMessage }], maxTokens: 600, temperature: 0.4 });
+  return extractJson(raw) || { recap: "I don't have much to report right now.", questions: [] };
 }
 
 async function parseRsvpEmail({ subject, from, text }) {
@@ -136,8 +160,8 @@ The user is watching for these keywords: ${keywords}. Only extract items that re
 async function generateLifeBalanceSuggestions(context) {
   const system = `You are a thoughtful personal scheduling assistant. Given the user's free time blocks, pending school tasks, and upcoming deadlines, suggest a short list (2-4) of specific, actionable ways to use their free time well this week. Respond with ONLY a JSON object, no prose, no markdown fences.
 Schema: { "suggestions": [ { "content": string, "suggested_for_date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM", "title": string } ] }
-Each suggestion's "content" should be one friendly sentence explaining the why. "title" is a short calendar-event-style label (e.g. "Study session: Calc II"). Respect the user's minimum daily free-time buffer of ${context.freeTimeBufferHours} hours — do not suggest filling time below that buffer.`;
-  const userMessage = `FREE TIME BLOCKS THIS WEEK:\n${JSON.stringify(context.freeBlocks || [], null, 2)}\n\nPENDING SCHOOL TASKS:\n${JSON.stringify(context.schoolTasks || [], null, 2)}\n\nUPCOMING EVENTS:\n${JSON.stringify(context.upcomingEvents || [], null, 2)}`;
+Each suggestion's "content" should be one friendly sentence explaining the why. "title" is a short calendar-event-style label (e.g. "Study session: Calc II"). Respect the user's minimum daily free-time buffer of ${context.freeTimeBufferHours} hours — do not suggest filling time below that buffer. Use what you know about the user's interests/goals/routines (below) to make suggestions genuinely personal, not generic.`;
+  const userMessage = `FREE TIME BLOCKS THIS WEEK:\n${JSON.stringify(context.freeBlocks || [], null, 2)}\n\nPENDING SCHOOL TASKS:\n${JSON.stringify(context.schoolTasks || [], null, 2)}\n\nUPCOMING EVENTS:\n${JSON.stringify(context.upcomingEvents || [], null, 2)}${formatMemories(context.memories)}`;
   const raw = await complete({ system, messages: [{ role: 'user', content: userMessage }], maxTokens: 800, temperature: 0.6 });
   return extractJson(raw) || { suggestions: [] };
 }
@@ -158,6 +182,7 @@ module.exports = {
   extractJson,
   generateMorningBrief,
   generateWeeklyPreview,
+  generateVoiceRecap,
   parseRsvpEmail,
   parseHotSchedulesEmail,
   parseSchoolEmail,

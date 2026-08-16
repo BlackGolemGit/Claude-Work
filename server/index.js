@@ -20,6 +20,7 @@ const schoolRoutes = require('./routes/school');
 const chatRoutes = require('./routes/chat');
 const settingsRoutes = require('./routes/settings');
 const notificationsRoutes = require('./routes/notifications');
+const memoryRoutes = require('./routes/memory');
 
 const { pollRsvps, pollSchoolEmails } = require('./jobs/gmailPoller');
 const { syncNow: syncHotSchedules } = require('./jobs/hotschedulesSync');
@@ -41,6 +42,7 @@ app.use('/api/school', schoolRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/notifications', notificationsRoutes);
+app.use('/api/memory', memoryRoutes);
 
 // Optionally serve a production client build if one has been built
 // (`npm run build` inside /client). Local dev instead runs the Vite dev
@@ -52,10 +54,16 @@ if (fs.existsSync(clientDist)) {
 }
 
 // Centralized error handler — guarantees the app never crashes on an
-// unhandled route error and always returns friendly JSON.
+// unhandled route error and always returns friendly JSON. Respects a
+// client-error status already attached by middleware (e.g. express.json()
+// rejecting malformed JSON with a 400) rather than always answering 500.
 app.use((err, req, res, next) => {
   console.error('[unhandled error]', err);
-  res.status(500).json({ error: 'An unexpected server error occurred.' });
+  const status = err.status || err.statusCode;
+  const isClientError = status >= 400 && status < 500;
+  res.status(isClientError ? status : 500).json({
+    error: isClientError ? err.message || 'Invalid request.' : 'An unexpected server error occurred.',
+  });
 });
 
 process.on('unhandledRejection', (reason) => {
@@ -63,47 +71,58 @@ process.on('unhandledRejection', (reason) => {
 });
 
 // ---------------------------------------------------------------------------
-// Scheduled jobs
+// Scheduled jobs — only registered (and the HTTP listener only started) when
+// this file is run directly (`node index.js`), not when it's `require()`d
+// as a module (e.g. by the test suite via supertest, which drives the
+// exported `app` against its own ephemeral in-process server).
 // ---------------------------------------------------------------------------
 
 function safeRun(name, fn) {
   fn().catch((err) => console.error(`[cron] ${name} failed:`, err.message));
 }
 
-// RSVP detection — every 30 minutes.
-cron.schedule('*/30 * * * *', () => safeRun('pollRsvps', pollRsvps));
+function start() {
+  // RSVP detection — every 30 minutes.
+  cron.schedule('*/30 * * * *', () => safeRun('pollRsvps', pollRsvps));
 
-// School/homework email scan — every hour.
-cron.schedule('0 * * * *', () => safeRun('pollSchoolEmails', pollSchoolEmails));
+  // School/homework email scan — every hour.
+  cron.schedule('0 * * * *', () => safeRun('pollSchoolEmails', pollSchoolEmails));
 
-// HotSchedules scan — once daily at 6:00am server time.
-cron.schedule('0 6 * * *', () => safeRun('syncHotSchedules', syncHotSchedules));
+  // HotSchedules scan — once daily at 6:00am server time.
+  cron.schedule('0 6 * * *', () => safeRun('syncHotSchedules', syncHotSchedules));
 
-// Morning briefing and weekly preview run on user-configured times of day.
-// Rather than re-creating a cron job whenever Settings changes, we check
-// every minute whether "now" matches the user's configured HH:MM, guarding
-// against double-firing within the same minute.
-let lastBriefKey = null;
-let lastPreviewKey = null;
+  // Morning briefing and weekly preview run on user-configured times of day.
+  // Rather than re-creating a cron job whenever Settings changes, we check
+  // every minute whether "now" matches the user's configured HH:MM, guarding
+  // against double-firing within the same minute.
+  let lastBriefKey = null;
+  let lastPreviewKey = null;
 
-cron.schedule('* * * * *', () => {
-  const user = getUser();
-  const now = new Date();
-  const hhmm = now.toTimeString().slice(0, 5);
-  const dateKey = now.toISOString().slice(0, 10);
+  cron.schedule('* * * * *', () => {
+    const user = getUser();
+    const now = new Date();
+    const hhmm = now.toTimeString().slice(0, 5);
+    const dateKey = now.toISOString().slice(0, 10);
 
-  if (user.morning_brief_time === hhmm && lastBriefKey !== dateKey) {
-    lastBriefKey = dateKey;
-    safeRun('runMorningBrief', runMorningBrief);
-  }
+    if (user.morning_brief_time === hhmm && lastBriefKey !== dateKey) {
+      lastBriefKey = dateKey;
+      safeRun('runMorningBrief', runMorningBrief);
+    }
 
-  // Sunday = 0
-  if (now.getDay() === 0 && user.weekly_preview_time === hhmm && lastPreviewKey !== dateKey) {
-    lastPreviewKey = dateKey;
-    safeRun('runWeeklyPreview', runWeeklyPreview);
-  }
-});
+    // Sunday = 0
+    if (now.getDay() === 0 && user.weekly_preview_time === hhmm && lastPreviewKey !== dateKey) {
+      lastPreviewKey = dateKey;
+      safeRun('runWeeklyPreview', runWeeklyPreview);
+    }
+  });
 
-app.listen(PORT, () => {
-  console.log(`AI Scheduling Agent server listening on http://localhost:${PORT}`);
-});
+  app.listen(PORT, () => {
+    console.log(`AI Scheduling Agent server listening on http://localhost:${PORT}`);
+  });
+}
+
+if (require.main === module) {
+  start();
+}
+
+module.exports = app;

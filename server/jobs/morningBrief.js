@@ -1,6 +1,6 @@
 // Gathers today's schedule context, asks Claude to write a friendly morning
 // briefing, and delivers it via the user's configured notification channel(s).
-const { getUser, db, recordSync } = require('../db/db');
+const { getUser, db, recordSync, listMemories } = require('../db/db');
 const calendarService = require('../services/calendar');
 const claude = require('../services/claude');
 const { deliverNotification } = require('../routes/notifications');
@@ -34,6 +34,7 @@ async function runMorningBrief() {
     workShifts,
     rsvps,
     conflicts,
+    memories: listMemories(),
   });
 
   const results = await deliverNotification({ subject: 'Your Morning Briefing ☀️', body: brief });

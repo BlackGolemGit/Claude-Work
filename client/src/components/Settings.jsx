@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
+import AccountsManager from './AccountsManager.jsx';
 
 const TIMEZONES = [
   'America/New_York',
@@ -53,25 +54,6 @@ export default function Settings() {
       setError(err.message);
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function connectGoogle() {
-    try {
-      const { url } = await api.get('/settings/google/auth-url');
-      window.location.href = url;
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  async function disconnectGoogle() {
-    try {
-      await api.post('/settings/google/disconnect');
-      const data = await api.get('/settings');
-      setSettings(data.settings);
-    } catch (err) {
-      setError(err.message);
     }
   }
 
@@ -144,22 +126,13 @@ export default function Settings() {
         <button onClick={sendTest} className="text-sm text-blue-600 hover:underline">Send a test notification</button>
       </Section>
 
-      <Section title="Google Account">
-        {settings.google_connected ? (
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-slate-600">Connected as <span className="font-medium">{settings.google_email}</span></p>
-            <button onClick={disconnectGoogle} className="text-sm font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg">
-              Disconnect
-            </button>
-          </div>
-        ) : (
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-slate-600">Connect your Google account to enable Calendar &amp; Gmail features.</p>
-            <button onClick={connectGoogle} className="text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg">
-              Connect Google
-            </button>
-          </div>
-        )}
+      <Section title="Connected Email Accounts">
+        <p className="text-sm text-slate-500 -mt-2">
+          Connect as many Google accounts and other IMAP inboxes (Outlook, Yahoo, school email, etc.) as you want —
+          the agent scans every active one for RSVPs, school emails, and HotSchedules shifts. Calendar reads/writes
+          always go through whichever Google account is marked "Calendar account".
+        </p>
+        <AccountsManager />
       </Section>
 
       <Section title="Twilio (SMS)">

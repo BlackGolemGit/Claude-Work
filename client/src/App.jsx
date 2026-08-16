@@ -4,12 +4,14 @@ import CalendarView from './components/CalendarView.jsx';
 import SchoolTasks from './components/SchoolTasks.jsx';
 import Chat from './components/Chat.jsx';
 import Settings from './components/Settings.jsx';
+import Memory from './components/Memory.jsx';
 
 const TABS = [
   { id: 'dashboard', label: 'Dashboard', icon: '🏠' },
   { id: 'calendar', label: 'Calendar', icon: '📅' },
   { id: 'school', label: 'School', icon: '📚' },
   { id: 'chat', label: 'Chat', icon: '💬' },
+  { id: 'memory', label: 'Memory', icon: '🧠' },
   { id: 'settings', label: 'Settings', icon: '⚙️' },
 ];
 
@@ -97,6 +99,7 @@ export default function App() {
           {activeTab === 'calendar' && <CalendarView />}
           {activeTab === 'school' && <SchoolTasks />}
           {activeTab === 'chat' && <Chat />}
+          {activeTab === 'memory' && <Memory />}
           {activeTab === 'settings' && <Settings />}
         </div>
       </main>

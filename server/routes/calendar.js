@@ -4,7 +4,7 @@ const express = require('express');
 const router = express.Router();
 const calendarService = require('../services/calendar');
 const claude = require('../services/claude');
-const { db, getUser, recordSync, getLastSync } = require('../db/db');
+const { db, getUser, recordSync, getLastSync, listMemories } = require('../db/db');
 
 function asyncHandler(fn) {
   return (req, res, next) => fn(req, res, next).catch((err) => {
@@ -163,6 +163,7 @@ async function runCalendarAnalysis() {
       schoolTasks,
       upcomingEvents: events.slice(0, 20),
       freeTimeBufferHours: user.free_time_buffer_hours,
+      memories: listMemories(),
     });
     for (const s of suggestions || []) {
       db.prepare(
